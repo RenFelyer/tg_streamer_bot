@@ -1,0 +1,20 @@
+# --- Python Core ---
+__pycache__/
+*.py[cod]
+*$py.class
+
+# --- Linters & Formatters (Ruff specific) ---
+.ruff_cache/
+
+# --- Environments (uv / venv / virtualenv) ---
+.venv/
+
+# --- IDE Settings ---
+.vscode/
+.idea/
+
+# --- Project Specific: Settings & Secrets (pydantic-settings) ---
+.env
+.env.*
+!.env.example
+assets/
