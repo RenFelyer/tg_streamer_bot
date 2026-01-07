@@ -1,5 +1,3 @@
-import queue
-import threading
 from functools import lru_cache
 from pathlib import Path
 
@@ -12,8 +10,8 @@ class Settings(BaseSettings):
     tg_link: str = Field(..., description='Telegram RTMPS link')
     tg_code: str = Field(..., description='Telegram RTMPS stream key')
 
-    width: int = 1280
-    height: int = 720
+    width: int = 1360
+    height: int = 752
 
     model_config = SettingsConfigDict(env_file='.env', env_file_encoding='utf-8', extra='ignore')
 
@@ -51,7 +49,4 @@ def get_settings() -> Settings:
 
 settings = get_settings()
 
-terminated = threading.Event()
-stream_queue: queue.Queue[Path] = queue.Queue()
-
-__all__ = ('settings', 'stream_queue', 'terminated')
+__all__ = ['settings']

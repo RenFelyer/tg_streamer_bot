@@ -5,9 +5,12 @@ from typing import TYPE_CHECKING
 
 import av
 from av.audio.frame import AudioFrame
+from av.filter import Graph
 from av.video.frame import VideoFrame
+from av.video.stream import VideoStream
 
 from app.core.config import settings
+from app.core.config.constants import *
 from app.core.interfaces import StreamManager
 from app.core.schemas import MediaPaths
 
@@ -15,30 +18,22 @@ if TYPE_CHECKING:
     from av.audio.stream import AudioStream
     from av.container.input import InputContainer
     from av.container.output import OutputContainer
-    from av.video.stream import VideoStream
-
-
-AUDIO_RATE = 48000
-AUDIO_FORMAT = 'fltp'
-AUDIO_LAYOUT = 'stereo'
-AUDIO_FRAME_SIZE = 1024
-AUDIO_BITRATE = 128_000  # 128 Kbps
-
-VIDEO_RATE = Fraction(30000, 1001)
-VIDEO_PIX_FMT = 'yuv420p'
-VIDEO_BITRATE = 2_000_000  # 2 Mbps
-VIDEO_WIDTH = settings.width
-VIDEO_HEIGHT = settings.height
 
 
 class TGStreamer(StreamManager):
     def __init__(self) -> None:
         super().__init__()
 
+        # Медиа очередь и текущий индекс
         self.media_reader: InputContainer | None = None
         self.broadcaster: OutputContainer | None = None
+
+        # Потоки для аудио и видео
         self.audio_stream: AudioStream | None = None
         self.video_stream: VideoStream | None = None
+
+        self.resampling: av.AudioResampler | None = None
+        self.conversion: Graph | None = None
 
     def start_stream(self) -> None:
         """Запускает потоковую передачу."""
@@ -58,6 +53,12 @@ class TGStreamer(StreamManager):
             'preset': 'ultrafast',  # Быстрое кодирование, чтобы не было лагов
             'tune': 'zerolatency',  # Минимальная задержка
         }
+
+    def close_stream(self) -> None:
+        if not self.broadcaster:
+            return
+
+        self.broadcaster.close()
 
     def select_track(self, index: int) -> None:
         """Принудительно переключает курсор на указанный индекс."""
@@ -83,5 +84,32 @@ class TGStreamer(StreamManager):
     def prev_track(self) -> None:
         raise NotImplementedError
 
+    def _create_resampling(self) -> bool:
+        if not self.broadcaster or not self.audio_stream:
+            return False
+
+        self.resampling = av.AudioResampler(
+            format=self.audio_stream.format,
+            layout=self.audio_stream.layout,
+            rate=self.audio_stream.rate,
+        )
+
+        return True
+
+    def _create_conversion(self, video_stream: VideoStream) -> bool:
+        if not self.broadcaster or not video_stream:
+            return False
+
+        self.conversion = graph = Graph()
+        self.conversion.link_nodes(
+            graph.add_buffer(template=video_stream),
+            graph.add('scale', f'{VIDEO_WIDTH}:{VIDEO_HEIGHT}'),
+            graph.add('fps', f'fps={VIDEO_RATE}'),  # Вот наш фильтр
+            graph.add('buffersink'),
+        ).configure()
+
+        return True
+
     def run(self) -> None:
-        pass
+        if not self.broadcaster or not self.audio_stream or not self.video_stream:
+            return

@@ -47,85 +47,69 @@ class ContentDownloader(ABC):
         """
 
 
-class StreamManager(ABC):
-    def __init__(self) -> None:
-        self.media_queue: list[MediaPaths] = []
-        self.current_index: int = 0
-
-        self.cursor_mode = PlaylistCursorMode.LOOP_QUEUE
-        self.visual_mode = StreamVisualMode.VIDEO_CONTENT
-
-    # --- Управление соединением ---
+class Player(ABC):
     @abstractmethod
-    def start_stream(self) -> None:
-        """Запускает потоковую передачу."""
+    def start(self) -> None:
+        """Запускает плеер."""
 
     @abstractmethod
-    def close_stream(self) -> None:
-        """Закрывает потоковую передачу."""
-
-    # --- Управление очередью (Playlist) ---
-    def add_track(self, media: MediaPaths) -> None:
-        """Добавляет медиа в конец очереди."""
-        self.media_queue.append(media)
+    def play(self, media: MediaPaths) -> None:
+        """Начинает воспроизведение указанного медиа."""
 
     @abstractmethod
-    def remove_track(self, index: int) -> None:
-        """Удаляет медиа из очереди по индексу."""
-        if 0 <= index < len(self.media_queue):
-            del self.media_queue[index]
+    def pause(self) -> None:
+        """Ставит воспроизведение на паузу."""
 
     @abstractmethod
-    def move_track(self, from_index: int, to_index: int) -> None:
-        """Перемещает трек внутри очереди (изменение порядка)."""
-        if not (0 <= from_index < len(self.media_queue)):
-            return
-
-        if not (0 <= to_index < len(self.media_queue)):
-            return
-
-        # Перемещение трека
-        track = self.media_queue.pop(from_index)
-        self.media_queue.insert(to_index, track)
+    def resume(self) -> None:
+        """Возобновляет воспроизведение."""
 
     @abstractmethod
-    def select_track(self, index: int) -> None:
-        """Принудительно переключает курсор на указанный индекс."""
-
-    # --- Управление воспроизведением ---
-    @abstractmethod
-    def pause_current_track(self) -> None:
-        """Ставит на паузу текущее видео."""
-
-    @abstractmethod
-    def resume_current_track(self) -> None:
-        """Возобновляет воспроизведение текущего видео."""
-
-    @abstractmethod
-    def restart_current_track(self) -> None:
-        """Перезапускает текущее видео."""
-
-    @abstractmethod
-    def next_track(self) -> None:
-        """Ручной переход к следующему треку."""
-
-    @abstractmethod
-    def prev_track(self) -> None:
-        """Ручной переход к предыдущему треку."""
-
-    # --- Настройки режимов ---
     def set_visual_mode(self, mode: StreamVisualMode) -> bool:
         """Устанавливает режим визуального отображения трансляции."""
-        if not isinstance(mode, StreamVisualMode):
-            return False
 
-        self.visual_mode = mode
-        return True
+    @abstractmethod
+    def close(self) -> None:
+        """Закрывает плеер и освобождает ресурсы."""
 
-    def set_cursor_mode(self, mode: PlaylistCursorMode) -> bool:
-        """Устанавливает логику работы курсора (очереди) после окончания трека."""
-        if not isinstance(mode, PlaylistCursorMode):
-            return False
+    @abstractmethod
+    def get_visual_mode(self) -> StreamVisualMode:
+        """Возвращает текущий режим визуального отображения трансляции."""
 
-        self.cursor_mode = mode
-        return True
+    @abstractmethod
+    def get_current_media(self) -> MediaPaths | None:
+        """Возвращает текущий воспроизводимый медиафайл."""
+
+
+class Playlist(ABC):
+    @abstractmethod
+    def add_track(self, media: MediaPaths) -> None:
+        """Добавляет трек в плейлист."""
+
+    @abstractmethod
+    def del_track(self, index: int) -> None:
+        """Удаляет трек из плейлиста по индексу."""
+
+    @abstractmethod
+    def move_track(self, old_index: int, new_index: int) -> None:
+        """Перемещает трек внутри плейлиста."""
+
+    @abstractmethod
+    def next_track(self) -> MediaPaths | None:
+        """Переходит к следующему треку в плейлисте."""
+
+    @abstractmethod
+    def prev_track(self) -> MediaPaths | None:
+        """Переходит к предыдущему треку в плейлисте."""
+
+    @abstractmethod
+    def get_tracks(self) -> list[MediaPaths]:
+        """Возвращает список всех треков в плейлисте."""
+
+    @abstractmethod
+    def set_cursor_mode(self, mode: PlaylistCursorMode) -> None:
+        """Устанавливает режим курсора плейлиста."""
+
+    @abstractmethod
+    def get_current_track(self) -> MediaPaths | None:
+        """Возвращает текущий трек в плейлисте."""

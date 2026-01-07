@@ -284,7 +284,7 @@ wheels = [
 [[package]]
 name = "streambind"
 version = "0.1.0"
-source = { virtual = "." }
+source = { editable = "." }
 dependencies = [
     { name = "av" },
     { name = "bgutil-ytdlp-pot-provider" },
