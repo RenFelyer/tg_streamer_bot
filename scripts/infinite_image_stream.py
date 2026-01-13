@@ -7,14 +7,7 @@ from pathlib import Path
 import av
 
 from app.core.config import settings
-from app.utils.streaming import (
-    AUDIO_TIME_BASE,
-    VIDEO_TIME_BASE,
-    StreamContext,
-    create_silence_frame,
-    interleave_frames,
-    prepare_video_frame,
-)
+from app.utils.streaming import StreamContext, create_silence_frame, prepare_video_frame
 
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s | %(levelname)s | %(message)s', datefmt='%H:%M:%S')
 logger = logging.getLogger(__name__)
@@ -23,6 +16,10 @@ logger = logging.getLogger(__name__)
 PLACEHOLDER_IMAGE = settings.assets_dir / 'technical_cookies.jpg'
 AUDIO_FRAME = create_silence_frame()
 VIDEO_FRAME = prepare_video_frame(PLACEHOLDER_IMAGE)
+
+
+MIN_SYNC_DELAY: float = 0.001
+MAX_SYNC_DELAY: float = 0.050
 
 
 def stream_to_telegram(rtmps_url: str) -> None:
@@ -34,13 +31,16 @@ def stream_to_telegram(rtmps_url: str) -> None:
         try:
             start_time = time.time()
             logger.info('Starting infinite stream. Press Ctrl+C to stop.')
-            for frame in interleave_frames(AUDIO_FRAME, VIDEO_FRAME):
-                ctx.encode_mux(frame)
+            while True:
+                if ctx.video_duration < ctx.audio_duration:
+                    ctx.encode_video(VIDEO_FRAME)
+                else:
+                    ctx.encode_audio(AUDIO_FRAME)
 
                 elapsed = time.time() - start_time
-                delay = ctx.duration - elapsed
-                if delay > 0:
-                    time.sleep(delay)
+                delay = float(ctx.duration) - elapsed
+                if delay > MIN_SYNC_DELAY:
+                    time.sleep(min(delay, MAX_SYNC_DELAY))
 
         except KeyboardInterrupt:
             logger.info('Keyboard interrupt received. Stopping stream...')

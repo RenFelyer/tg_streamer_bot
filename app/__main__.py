@@ -1,76 +1,90 @@
+import asyncio
 import logging
 import sys
-import time
-from fractions import Fraction
-from pathlib import Path
+import threading
 
-import av
-import numpy as np
-from av.audio.frame import AudioFrame
-from av.audio.stream import AudioStream
-from av.video.frame import VideoFrame
-from av.video.stream import VideoStream
-from PIL import Image
+from aiogram import Bot, Dispatcher
+from aiogram.client.default import DefaultBotProperties
+from aiogram.enums import ParseMode
+from aiogram.fsm.storage.memory import MemoryStorage
 
-from app.core.config import settings
-from app.core.schemas import MediaPaths
-from app.services.downloader import YTDownloader
-from app.services.streamer import TGStreamer
+from app.bot.handlers import router as main_router
+from app.core.config import settings, setup_logger
+from app.core.enums import CommonCommand, StreamCursorMode, StreamVisualMode
+from app.deliver import AVPlayer, AVStreamer
+from app.receive import YTDLPReceiver
 
-logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
-logo_path = settings.assets_dir / 'technical_cookies.jpg'
 
+async def main() -> None:
+    """Главная функция приложения."""
+    # Настройка логирования
+    setup_logger()
 
-def get_approximate_pts(stream: AudioStream | VideoStream) -> int | None:
-    if stream.duration and stream.start_time is not None:
-        # duration — это длительность в единицах time_base
-        # start_time — это PTS первого кадра
-        return stream.start_time + stream.duration
-
-    return None
-
-
-def main(media: MediaPaths) -> None:
-    streamer = TGStreamer()
-    streamer.start_stream()
-    streamer._create_resampling()  # noqa: SLF001
-
-    if not (streamer.audio_stream and streamer.video_stream and streamer.broadcaster and streamer.resampling):
-        logger.error('Streamer is not properly initialized.')
+    # Валидация конфигурации
+    if not settings.bot_token:
+        logger.error('BOT_TOKEN не установлен в переменных окружения')
         sys.exit(1)
 
+    if not settings.tg_link or not settings.tg_code:
+        logger.error('TG_LINK и TG_CODE должны быть установлены для RTMP трансляции')
+        sys.exit(1)
+
+    rtmps_url = settings.rtmps_url
+    if not rtmps_url or 'rtmp' not in rtmps_url.lower():
+        logger.error('Invalid RTMPS URL. Check TG_LINK and TG_CODE in .env')
+        sys.exit(1)
+
+    placeholder_path = settings.placeholder_path
+    if not placeholder_path.exists():
+        logger.error('Placeholder image not found at %s', placeholder_path)
+        sys.exit(1)
+
+    player = AVPlayer(
+        visual_mode=StreamVisualMode.VIDEO_CONTENT,
+        cursor_mode=StreamCursorMode.LOOP_PLAYLIST,
+    )
+    streamer = AVStreamer(rtmps_url, player, settings.placeholder_path)
+    downloader = YTDLPReceiver(settings.multimedia_dir)
+
+    thread = threading.Thread(
+        name='livestream_thread',
+        target=streamer.run,
+        daemon=True,
+    )
+
+    # Создаём бота и диспетчер
+    bot = Bot(
+        token=settings.bot_token,
+        default=DefaultBotProperties(
+            parse_mode=ParseMode.HTML,
+            link_preview_is_disabled=True,
+        ),
+    )
+    await bot.set_my_commands(CommonCommand.list_commands())
+    dp = Dispatcher(storage=MemoryStorage())
+
+    # Регистрируем роутеры (порядок важен!)
+    dp.include_router(main_router)
+
+    # Регистрируем хуки жизненного цикла
+    dp.startup.register(thread.start)
+    dp.shutdown.register(streamer.stop)
+
+    # Запускаем polling
     try:
-        pass
-
-    except KeyboardInterrupt:
-        logger.info('Stopping stream via KeyboardInterrupt...')
-
-    except Exception:
-        logger.exception('Error during streaming')
-
+        await dp.start_polling(
+            bot,
+            allowed_updates=dp.resolve_used_update_types(),
+            downloader=downloader,
+            player=player,
+        )
     finally:
-        # 3. Flush (сброс буферов)
-        logger.info('Flushing encoders...')
-        for packet in streamer.video_stream.encode(None):
-            streamer.broadcaster.mux(packet)
-
-        for packet in streamer.audio_stream.encode(None):
-            streamer.broadcaster.mux(packet)
-
-        streamer.close_stream()
-        logger.info('Stream closed.')
+        await bot.session.close()
+        if thread.is_alive():
+            await asyncio.to_thread(thread.join)
 
 
 if __name__ == '__main__':
-    downloader = YTDownloader(download_dir=settings.multimedia_dir)
-    mediafile = downloader.get_media_by_id('-xeVJM786lQ')
-    if not mediafile.exists or not mediafile.mediafile_path:
-        logger.error('Media file does not exist. Exiting.')
-        sys.exit(1)
-
-    try:
-        main(mediafile)
-    except KeyboardInterrupt:
-        logger.info('Stream stopped by user.')
+    asyncio.run(main())

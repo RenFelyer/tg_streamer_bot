@@ -1,0 +1,16 @@
+from aiogram.filters import Filter
+from aiogram.types import Message
+
+from app.core.config import settings
+
+
+class IsAdmin(Filter):
+    """Фильтр для проверки принадлежности пользователя к администраторам."""
+
+    async def __call__(self, message: Message) -> bool:
+        if message.from_user is None:
+            return False
+        return message.from_user.id in settings.admin_ids
+
+
+__all__ = ['IsAdmin']

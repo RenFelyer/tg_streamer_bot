@@ -7,11 +7,8 @@ import av
 
 from app.core.config import settings
 from app.utils.streaming import (
-    AUDIO_TIME_BASE,
-    VIDEO_TIME_BASE,
     StreamContext,
     create_silence_frame,
-    interleave_frames,
     prepare_video_frame,
 )
 
@@ -25,29 +22,32 @@ VIDEO_FRAME = prepare_video_frame(settings.assets_dir / 'technical_cookies.jpg')
 DEFAULT_DURATION_SECONDS = 5
 
 
-def produce_video(image_path: Path, duration_seconds: int = DEFAULT_DURATION_SECONDS) -> None:
+def produce_video(image_path: Path) -> None:
     video_path = image_path.with_suffix('.mp4')
+    old_progress = old_seconds = -1
 
     if video_path.exists() and video_path.is_file():
         logger.info('Removing existing video file: %s', video_path)
         video_path.unlink(missing_ok=True)
 
-    logger.info('Creating video: %s (duration: %d sec)', video_path.name, duration_seconds)
-    with av.open(video_path, mode='w') as output_container:
-        ctx = StreamContext(output_container)
+    logger.info('Creating video: %s (duration: %d sec)', video_path.name, DEFAULT_DURATION_SECONDS)
+    with av.open(video_path, mode='w') as container:
+        ctx = StreamContext(container)
 
-        try:
-            for frame in interleave_frames(AUDIO_FRAME, VIDEO_FRAME, duration_seconds):
-                ctx.encode_mux(frame)
+        while ctx.duration < DEFAULT_DURATION_SECONDS:
+            if ctx.video_duration < ctx.audio_duration:
+                ctx.encode_video(VIDEO_FRAME)
+            else:
+                ctx.encode_audio(AUDIO_FRAME)
 
-        except KeyboardInterrupt:
-            logger.info('Keyboard interrupt received. Stopping encoding...')
+            progress = int((ctx.duration / DEFAULT_DURATION_SECONDS) * 100)
+            seconds = int(ctx.duration)
+            if progress != old_progress and seconds != old_seconds:
+                logger.info('Progress: %d%% / %s sec', progress, timedelta(seconds=seconds))
+                old_progress, old_seconds = progress, seconds
 
-        finally:
-            logger.info('Encoding completed. Total duration: %s', timedelta(seconds=int(ctx.duration)))
-            ctx.flush(close=True)
-
-    logger.info('Video file created: %s', video_path)
+        ctx.flush(close=True)
+        logger.info('Video created successfully: %s', timedelta(seconds=int(ctx.duration)))
 
 
 if __name__ == '__main__':
@@ -59,4 +59,4 @@ if __name__ == '__main__':
         sys.exit(1)
 
     logger.info('Image: %s', image_path.name)
-    produce_video(image_path, duration_seconds=DEFAULT_DURATION_SECONDS)
+    produce_video(image_path)

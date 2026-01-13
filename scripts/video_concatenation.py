@@ -1,5 +1,4 @@
 import logging
-import sys
 import time
 from datetime import timedelta
 from pathlib import Path
@@ -8,7 +7,7 @@ import av
 
 from app.core.config import settings
 from app.services.downloader import YTDownloader
-from app.utils.streaming import StreamContext, create_silence_frame, interleave_frames, prepare_video_frame
+from app.utils.streaming import StreamContext, create_silence_frame, prepare_video_frame
 
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s | %(levelname)s | %(message)s', datefmt='%H:%M:%S')
 logger = logging.getLogger(__name__)
@@ -20,101 +19,136 @@ AUDIO_FRAME = create_silence_frame()
 VIDEO_FRAME = prepare_video_frame(PLACEHOLDER_IMAGE)
 
 
-def add_placeholder(context: StreamContext, duration_seconds: int) -> None:
-    for frame in interleave_frames(AUDIO_FRAME, VIDEO_FRAME, duration_seconds=duration_seconds):
-        context.encode_mux(frame)
+def add_placeholder(ctx: StreamContext, duration: int) -> None:
+    logger.info('Adding placeholder: %d seconds', duration)
+    old_progress = old_seconds = -1
+    initial_duration = ctx.duration
 
-    context.flush(close=False)
+    while ctx.duration < initial_duration + duration:
+        if ctx.video_duration <= ctx.audio_duration:
+            ctx.encode_video(VIDEO_FRAME)
+        else:
+            ctx.encode_audio(AUDIO_FRAME)
+
+        progress = int((ctx.duration - initial_duration) / duration * 100)
+        seconds = int(ctx.duration - initial_duration)
+
+        if progress != old_progress and seconds != old_seconds:
+            logger.debug(
+                'Placeholder: %3d%% | Segment: %s | Total: %s (V: %s / A: %s)',
+                progress,
+                timedelta(seconds=seconds),
+                timedelta(seconds=int(ctx.duration)),
+                timedelta(seconds=int(ctx.video_duration)),
+                timedelta(seconds=int(ctx.audio_duration)),
+            )
+            old_progress, old_seconds = progress, seconds
 
 
-def add_container(context: StreamContext, media_path: Path) -> None:
-    with av.open(media_path, mode='r') as input_container:
-        audio_stream = next(iter(input_container.streams.audio), None)
-        video_stream = next(iter(input_container.streams.video), None)
+def add_mediafile(ctx: StreamContext, media_path: Path) -> None:
+    logger.info('Adding media file: %s', media_path.name)
 
-        # Создаем граф для аудио
-        if audio_stream:
-            context.create_graph(stream=audio_stream)
+    with av.open(media_path, mode='r') as src_container:
+        audio_stream = next(iter(src_container.streams.audio), None)
+        video_stream = next(iter(src_container.streams.video), None)
 
-        if video_stream:
-            context.create_graph(stream=video_stream)
+        if not src_container.duration:
+            logger.warning('Media file has no duration info: %s', media_path)
+            return
 
-        for packet in input_container.demux(audio_stream, video_stream):
+        duration = int(src_container.duration / av.time_base)
+        logger.info('Media duration: %s', timedelta(seconds=duration))
+
+        if audio_stream is not None:
+            ctx.create_graph(audio_stream)
+
+        if video_stream is not None:
+            ctx.create_graph(video_stream)
+
+        old_progress = old_seconds = -1
+        for packet in src_container.demux(audio_stream, video_stream):
+            max_time = 0.0
             for frame in packet.decode():
-                if not isinstance(frame, (av.AudioFrame, av.VideoFrame)):
-                    continue
+                if isinstance(frame, av.AudioFrame):
+                    max_time = frame.time or max_time
+                    ctx.encode_audio(frame)
 
-                if frame.pts is None or frame.time_base is None:
-                    continue
+                elif isinstance(frame, av.VideoFrame):
+                    max_time = frame.time or max_time
+                    ctx.encode_video(frame)
 
-                context.encode_mux(frame)
+            progress = int((max_time / duration) * 100)
+            seconds = int(max_time)
 
-        context.flush(close=False)
+            if progress != old_progress and seconds != old_seconds:
+                logger.debug(
+                    'Media: %3d%% | Processed: %s | Total: %s (V: %s / A: %s)',
+                    progress,
+                    timedelta(seconds=seconds),
+                    timedelta(seconds=int(ctx.duration)),
+                    timedelta(seconds=int(ctx.video_duration)),
+                    timedelta(seconds=int(ctx.audio_duration)),
+                )
+                old_progress, old_seconds = progress, seconds
+
+        ctx.flush(close=False)
+        logger.info('Media file added successfully')
 
 
-def concatenate_videos(video1_media: Path, video2_media: Path, output_path: Path) -> None:
-    queue = [20, video1_media, 10, video2_media, 30]
-
+def concatenate_videos(*videos: Path, output_path: Path) -> None:
     if output_path.exists() and output_path.is_file():
-        logger.info('Removing existing video file: %s', output_path)
+        logger.info('Removing existing video file: %s', output_path.name)
         output_path.unlink(missing_ok=True)
+
     start_time = time.time()
+    slots = len(videos) * 2 + 1
+    queue = [videos[i // 2] if i % 2 else 10 for i in range(slots)]
+
+    logger.info('Total segments to process: %d (%d videos + %d placeholders)', slots, len(videos), slots - len(videos))
+
     with av.open(output_path, mode='w') as container:
-        context = StreamContext(container)
+        ctx = StreamContext(container)
+        segment_number = 0
 
-        try:
-            while queue:
-                item = queue.pop(0)
+        while queue:
+            segment_number += 1
+            item = queue.pop(0)
 
-                if isinstance(item, int):
-                    add_placeholder(context, duration_seconds=item)
-                    continue
+            if isinstance(item, Path):
+                logger.info('--- Segment %d/%d: Media ---', segment_number, slots)
+                add_mediafile(ctx, item)
 
-                if isinstance(item, Path):
-                    add_container(context, media_path=item)
-                    continue
+            elif isinstance(item, int):
+                logger.info('--- Segment %d/%d: Placeholder ---', segment_number, slots)
+                add_placeholder(ctx, item)
 
-        except KeyboardInterrupt:
-            logger.info('Video concatenation interrupted by user.')
+            else:
+                raise TypeError('Unexpected item in queue.')
 
-        except Exception:
-            logger.exception('Error during video concatenation')
-            raise
+        logger.info('Finalizing video...')
+        ctx.flush(close=True)
+        logger.info(
+            'Final duration: %s (V: %s / A: %s)',
+            timedelta(seconds=int(ctx.duration)),
+            timedelta(seconds=int(ctx.video_duration)),
+            timedelta(seconds=int(ctx.audio_duration)),
+        )
 
-        finally:
-            context.flush(close=True)
-            elapsed_time = timedelta(seconds=int(time.time() - start_time))
-            logger.info('Video concatenation completed in %s', elapsed_time)
+    elapsed_time = time.time() - start_time
+    logger.info('Concatenation finished in %s', timedelta(seconds=int(elapsed_time)))
 
 
 if __name__ == '__main__':
     downloader = YTDownloader(download_dir=settings.multimedia_dir)
+    video_ids = [
+        input('Введите ID первого видео: ').strip() or 'clwYCPS71uU',
+        input('Введите ID второго видео: ').strip() or 'em2sOOWVPYM',
+    ]
 
-    video1_id = input('Введите ID первого видео: ').strip()
-    if not video1_id:
-        logger.error('ID первого видео не может быть пустым.')
-        sys.exit(1)
-
-    video2_id = input('Введите ID второго видео: ').strip()
-    if not video2_id:
-        logger.error('ID второго видео не может быть пустым.')
-        sys.exit(1)
-
-    video1_media = downloader.get_media_by_id(video1_id)
-    if not video1_media.exists or video1_media.mediafile_path is None:
-        logger.error('Не удалось получить первое видео: %s', video1_id)
-        sys.exit(1)
-
-    video2_media = downloader.get_media_by_id(video2_id)
-    if not video2_media.exists or video2_media.mediafile_path is None:
-        logger.error('Не удалось получить второе видео: %s', video2_id)
-        sys.exit(1)
-
-    output_filename = f'concatenated_{video1_id}_{video2_id}.mp4'
-    output_path = settings.assets_dir / output_filename
-    video1_path = video1_media.mediafile_path
-    video2_path = video2_media.mediafile_path
+    video_paths = [downloader.get_media_by_id(video_id) for video_id in video_ids if video_id]
+    video_paths = [path.mediafile_path for path in video_paths if path and path.mediafile_path]
+    output_filename = f'concatenated_{"_".join(video_ids)}.mp4'
 
     logger.info('Starting video concatenation process...')
-    concatenate_videos(video1_path, video2_path, output_path)
+    concatenate_videos(*video_paths, output_path=settings.assets_dir / output_filename)
     logger.info('Video concatenation completed successfully.')
